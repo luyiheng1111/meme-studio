@@ -1,4 +1,4 @@
-const CACHE_NAME = 'meme-studio-v1';
+const CACHE_NAME = 'meme-studio-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -9,7 +9,8 @@ const ASSETS = [
   './babel.min.js',
   './lucide.js',
   './icon-192.png',
-  './icon-512.png'
+  './icon-512.png',
+  './weisuomao.png'
 ];
 
 self.addEventListener('install', (event) => {
