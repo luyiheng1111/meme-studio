@@ -93,6 +93,7 @@
           const isPanning = useRef(false);
           const initialPinchDist = useRef(null);
           const initialPanPos = useRef(null);
+          const startDrawPosRef = useRef(null);
 
           // ==== Step 3: 合成与滤镜状态 ====
           const compositeCanvasRef = useRef(null);
@@ -219,6 +220,7 @@
             // 多指缩放/平移
             if (e.touches && e.touches.length === 2) {
               isPanning.current = true;
+              startDrawPosRef.current = null; // 确保清除单指预备点
               initialPinchDist.current = getDist(e.touches[0], e.touches[1]);
               initialPanPos.current = { center: getCenter(e.touches[0], e.touches[1]), transform: { ...canvasTransform } };
               setIsDrawing(false);
@@ -232,14 +234,15 @@
               const ctx = canvas.getContext('2d');
               const pos = getCanvasPos(e, canvas);
               
+              // 不在此处立刻画点（防止捏合误触），仅记录初始位置，等移动或松手时再画
+              startDrawPosRef.current = pos;
+              
               ctx.beginPath();
               ctx.moveTo(pos.x, pos.y);
               const rect = canvas.getBoundingClientRect();
               ctx.lineWidth = brushSize * (canvas.width / rect.width); 
               ctx.strokeStyle = brushMode === 'eraser' ? 'rgba(0,0,0,1)' : 'rgba(255, 0, 0, 1)';
               ctx.globalCompositeOperation = brushMode === 'eraser' ? 'destination-out' : 'source-over';
-              ctx.lineTo(pos.x, pos.y);
-              ctx.stroke();
             }
           };
 
@@ -265,8 +268,10 @@
               const canvas = maskCanvasRef.current;
               const ctx = canvas.getContext('2d');
               const pos = getCanvasPos(e, canvas);
+              
               ctx.lineTo(pos.x, pos.y);
               ctx.stroke();
+              startDrawPosRef.current = null; // 移动过了，不需要在松手时补点
             }
           };
 
@@ -274,7 +279,17 @@
             isPanning.current = false;
             if (isDrawing) {
               setIsDrawing(false);
-              if (maskCanvasRef.current) maskCanvasRef.current.getContext('2d').closePath();
+              const canvas = maskCanvasRef.current;
+              if (canvas) {
+                const ctx = canvas.getContext('2d');
+                // 如果用户仅仅是轻点一下（没有触发 draw），可以在此时补上一个触碰圆点
+                if (startDrawPosRef.current) {
+                  ctx.lineTo(startDrawPosRef.current.x, startDrawPosRef.current.y);
+                  ctx.stroke();
+                  startDrawPosRef.current = null;
+                }
+                ctx.closePath();
+              }
             }
           };
 
