@@ -47,7 +47,7 @@
             border: 1px solid rgba(63, 63, 70, 0.3);
         }
         .canvas-container {
-            touch-action: none; /* 禁用默认手势，交给 JS 处理 */
+            touch-action: none;
         }
     </style>
     
@@ -65,212 +65,472 @@
     <script type="text/babel">
         const { useState, useRef, useEffect, useCallback } = React;
 
-        // 图标组件
         const Icon = ({ name, size = 24, className = "" }) => {
             useEffect(() => { lucide.createIcons(); }, [name]);
             return <i data-lucide={name} style={{ width: size, height: size }} className={className}></i>;
         };
 
-        // --- 应用主组件 ---
         function App() {
-            const [step, setStep] = useState(1); // 1: 上传, 2: 编辑
-            const [baseImg, setBaseImg] = useState(null);
-            const [faceImg, setFaceImg] = useState(null);
+          const [step, setStep] = useState(1); 
+          
+          // 图形源数据
+          const [baseImgObj, setBaseImgObj] = useState(null);
+          const [imgObj, setImgObj] = useState(null); 
+          const [maskImgObj, setMaskImgObj] = useState(null);
+          
+          const [basePreview, setBasePreview] = useState(null);
+          const [facePreview, setFacePreview] = useState(null);
+          
+          // ==== Step 2: 抠图状态 ====
+          const imageCanvasRef = useRef(null);
+          const maskCanvasRef = useRef(null);
+          const [isDrawing, setIsDrawing] = useState(false);
+          const [brushMode, setBrushMode] = useState('brush'); 
+          const [brushSize, setBrushSize] = useState(30);
+
+          // ==== Step 3: 合成与滤镜状态 ====
+          const compositeCanvasRef = useRef(null);
+          const processedFaceRef = useRef(null);
+          const [renderTrigger, setRenderTrigger] = useState(0);
+          const [faceConfig, setFaceConfig] = useState({ x: 0, y: 0, scale: 1, rotation: 0 });
+          const hasInitConfigRef = useRef(false);
+          
+          const [faceFilter, setFaceFilter] = useState({ 
+            brightness: 10,   
+            contrast: 0,      
+            blackPoint: 60,   
+            whitePoint: 190,  
+            feather: 8        
+          }); 
+          
+          const [isDraggingFace, setIsDraggingFace] = useState(false);
+          const dragStartRef = useRef({ x: 0, y: 0, faceX: 0, faceY: 0 });
+
+          // ==== 步骤 1：处理文件上传 ====
+          const handleUploadBase = (e) => {
+            const file = e.target.files[0];
+            if (file) {
+              hasInitConfigRef.current = false;
+              const reader = new FileReader();
+              reader.onload = (event) => {
+                setBasePreview(event.target.result);
+                const img = new Image();
+                img.onload = () => setBaseImgObj(img);
+                img.src = event.target.result;
+              };
+              reader.readAsDataURL(file);
+            }
+          };
+
+          const handleUploadFace = (e) => {
+            const file = e.target.files[0];
+            if (file) {
+              setMaskImgObj(null);
+              hasInitConfigRef.current = false;
+              const reader = new FileReader();
+              reader.onload = (event) => {
+                setFacePreview(event.target.result);
+                const img = new Image();
+                img.onload = () => setImgObj(img);
+                img.src = event.target.result;
+              };
+              reader.readAsDataURL(file);
+            }
+          };
+
+          const goToStep2 = () => {
+            if (baseImgObj && imgObj) {
+              setStep(2);
+            }
+          };
+
+          // ==== 步骤 2：抠图逻辑 ====
+          useEffect(() => {
+            if (step === 2 && imgObj && imageCanvasRef.current && maskCanvasRef.current) {
+              const imageCanvas = imageCanvasRef.current;
+              const maskCanvas = maskCanvasRef.current;
+              
+              imageCanvas.width = imgObj.width;
+              imageCanvas.height = imgObj.height;
+              maskCanvas.width = imgObj.width;
+              maskCanvas.height = imgObj.height;
+
+              const imgCtx = imageCanvas.getContext('2d');
+              imgCtx.drawImage(imgObj, 0, 0);
+
+              const maskCtx = maskCanvas.getContext('2d');
+              maskCtx.lineCap = 'round';
+              maskCtx.lineJoin = 'round';
+              
+              if (maskImgObj) {
+                maskCtx.drawImage(maskImgObj, 0, 0);
+              }
+            }
+          }, [step, imgObj, maskImgObj]);
+
+          const getCanvasPos = (e, canvas) => {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            return {
+              x: (clientX - rect.left) * scaleX,
+              y: (clientY - rect.top) * scaleY
+            };
+          };
+
+          const startDrawing = (e) => {
+            if (step !== 2) return;
+            // e.preventDefault(); 可能会导致移动端点击按钮失效，仅在包含 touches 时阻止
+            if(e.cancelable) e.preventDefault(); 
+            setIsDrawing(true);
+            const canvas = maskCanvasRef.current;
+            const ctx = canvas.getContext('2d');
+            const pos = getCanvasPos(e, canvas);
             
-            // 编辑状态
-            const [config, setConfig] = useState({
-                x: 256, y: 200, scale: 0.5, rotate: 0,
-                brightness: 100, contrast: 100, threshold: 128, grayscale: true,
-                feather: 5
-            });
+            ctx.beginPath();
+            ctx.moveTo(pos.x, pos.y);
+            ctx.lineWidth = brushSize * (canvas.width / canvas.clientWidth); 
+            ctx.strokeStyle = brushMode === 'eraser' ? 'rgba(0,0,0,1)' : 'rgba(255, 0, 0, 1)';
+            ctx.globalCompositeOperation = brushMode === 'eraser' ? 'destination-out' : 'source-over';
+            
+            ctx.lineTo(pos.x, pos.y);
+            ctx.stroke();
+          };
 
-            const canvasRef = useRef(null);
-            const faceCanvasRef = useRef(null); // 处理后的脸部离屏 Canvas
-            const containerRef = useRef(null);
-            const isDragging = useRef(false);
-            const lastPos = useRef({ x: 0, y: 0 });
+          const draw = (e) => {
+            if (!isDrawing || step !== 2) return;
+            if(e.cancelable) e.preventDefault();
+            const canvas = maskCanvasRef.current;
+            const ctx = canvas.getContext('2d');
+            const pos = getCanvasPos(e, canvas);
+            ctx.lineTo(pos.x, pos.y);
+            ctx.stroke();
+          };
 
-            // 处理上传
-            const handleUpload = (type, e) => {
-                const file = e.target.files[0];
-                if (!file) return;
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        if (type === 'base') setBaseImg(img);
-                        else {
-                            setFaceImg(img);
-                            setStep(2); // 上传完脸部自动进入编辑
-                        }
-                    };
-                    img.src = event.target.result;
-                };
-                reader.readAsDataURL(file);
+          const stopDrawing = () => {
+            if (isDrawing) {
+              setIsDrawing(false);
+              if (maskCanvasRef.current) {
+                maskCanvasRef.current.getContext('2d').closePath();
+              }
+            }
+          };
+
+          const clearMask = () => {
+            const canvas = maskCanvasRef.current;
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            setMaskImgObj(null);
+          };
+
+          const handleExtractFace = () => {
+            const maskDataUrl = maskCanvasRef.current.toDataURL('image/png');
+            const maskImg = new Image();
+            maskImg.onload = () => {
+              setMaskImgObj(maskImg);
+              if (!hasInitConfigRef.current) {
+                setFaceConfig({
+                  x: baseImgObj.width / 2,
+                  y: baseImgObj.height / 2,
+                  scale: 1,
+                  rotation: 0
+                });
+                hasInitConfigRef.current = true;
+              }
+              setStep(3);
             };
+            maskImg.src = maskDataUrl;
+          };
 
-            // 核心绘制逻辑
-            const draw = useCallback(() => {
-                if (!canvasRef.current || !baseImg) return;
-                const ctx = canvasRef.current.getContext('2d');
-                const w = 512;
-                const h = 512;
-                canvasRef.current.width = w;
-                canvasRef.current.height = h;
+          // ==== 步骤 3：核心像素处理及色阶 ====
+          useEffect(() => {
+            if (step === 3 && imgObj && maskImgObj) {
+              const canvas = document.createElement('canvas');
+              canvas.width = imgObj.width;
+              canvas.height = imgObj.height;
+              const ctx = canvas.getContext('2d');
 
-                // 1. 画底图
-                ctx.clearRect(0, 0, w, h);
-                ctx.drawImage(baseImg, 0, 0, w, h);
+              ctx.filter = `blur(${faceFilter.feather}px)`;
+              ctx.drawImage(maskImgObj, 0, 0);
 
-                // 2. 画脸部 (带滤镜)
-                if (faceImg) {
-                    const tempCanvas = document.createElement('canvas');
-                    const tempCtx = tempCanvas.getContext('2d');
-                    tempCanvas.width = faceImg.width;
-                    tempCanvas.height = faceImg.height;
+              ctx.filter = 'none';
+              ctx.globalCompositeOperation = 'source-in';
+              ctx.drawImage(imgObj, 0, 0);
 
-                    // 应用滤镜
-                    tempCtx.filter = `brightness(${config.brightness}%) contrast(${config.contrast}%) grayscale(${config.grayscale ? 1 : 0})`;
-                    tempCtx.drawImage(faceImg, 0, 0);
+              const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const data = imageData.data;
 
-                    // 应用阈值 (熊猫头黑白效果)
-                    if (config.grayscale) {
-                        const imageData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
-                        const data = imageData.data;
-                        for (let i = 0; i < data.length; i += 4) {
-                            const avg = (data[i] + data[i+1] + data[i+2]) / 3;
-                            const val = avg > config.threshold ? 255 : 0;
-                            data[i] = data[i+1] = data[i+2] = val;
-                        }
-                        tempCtx.putImageData(imageData, 0, 0);
-                    }
+              const bp = faceFilter.blackPoint;
+              const wp = faceFilter.whitePoint;
+              const br = faceFilter.brightness;
+              const ct = faceFilter.contrast;
+              const range = wp - bp === 0 ? 1 : wp - bp;
+              
+              const factor = (259 * (ct + 255)) / (255 * (259 - ct));
 
-                    // 绘制到主 Canvas
-                    ctx.save();
-                    ctx.translate(config.x, config.y);
-                    ctx.rotate(config.rotate * Math.PI / 180);
-                    const drawW = faceImg.width * config.scale;
-                    const drawH = faceImg.height * config.scale;
-                    
-                    // 简单的羽化效果：在绘制前设置 globalAlpha 或使用阴影(性能开销大)
-                    // 这里我们直接绘制
-                    ctx.drawImage(tempCanvas, -drawW/2, -drawH/2, drawW, drawH);
-                    ctx.restore();
-                }
-            }, [baseImg, faceImg, config]);
+              for (let i = 0; i < data.length; i += 4) {
+                if (data[i+3] === 0) continue;
 
-            useEffect(() => {
-                draw();
-            }, [draw]);
+                let gray = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+                gray += br;
+                gray = factor * (gray - 128) + 128;
+                gray = 255 * (gray - bp) / range;
+                gray = Math.max(0, Math.min(255, gray));
 
-            // 触摸/鼠标交互
-            const onStart = (e) => {
-                isDragging.current = true;
-                const pos = e.touches ? e.touches[0] : e;
-                lastPos.current = { x: pos.clientX, y: pos.clientY };
-            };
+                data[i] = gray;
+                data[i+1] = gray;
+                data[i+2] = gray;
+              }
 
-            const onMove = (e) => {
-                if (!isDragging.current) return;
-                const pos = e.touches ? e.touches[0] : e;
-                const dx = pos.clientX - lastPos.current.x;
-                const dy = pos.clientY - lastPos.current.y;
-                setConfig(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
-                lastPos.current = { x: pos.clientX, y: pos.clientY };
-            };
+              ctx.putImageData(imageData, 0, 0);
+              processedFaceRef.current = canvas;
+              setRenderTrigger(prev => prev + 1);
+            }
+          }, [step, imgObj, maskImgObj, faceFilter]);
 
-            const onEnd = () => { isDragging.current = false; };
+          // ==== 步骤 3：合成渲染主画布 ====
+          useEffect(() => {
+            if (step === 3 && baseImgObj && processedFaceRef.current && compositeCanvasRef.current) {
+              const canvas = compositeCanvasRef.current;
+              const ctx = canvas.getContext('2d');
+              
+              canvas.width = baseImgObj.width;
+              canvas.height = baseImgObj.height;
 
-            const download = () => {
-                const link = document.createElement('a');
-                link.download = 'meme-pro-' + Date.now() + '.png';
-                link.href = canvasRef.current.toDataURL('image/png');
-                link.click();
-            };
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(baseImgObj, 0, 0);
 
-            return (
-                <div className="min-h-screen bg-zinc-950 text-zinc-200 flex flex-col items-center p-4 pb-20">
-                    {/* Header */}
-                    <div className="w-full max-w-lg flex flex-col items-center mb-8 pt-4">
-                        <div className="p-3 bg-yellow-500 rounded-2xl shadow-[0_0_20px_rgba(234,179,8,0.3)] mb-4">
-                            <Icon name="crown" size={32} className="text-zinc-950" />
-                        </div>
-                        <h1 className="text-2xl font-black tracking-tighter bg-gradient-to-r from-yellow-400 to-yellow-600 bg-clip-text text-transparent italic">MEME STUDIO PRO</h1>
-                    </div>
+              ctx.save();
+              ctx.translate(faceConfig.x, faceConfig.y);
+              ctx.rotate((faceConfig.rotation * Math.PI) / 180);
+              ctx.scale(faceConfig.scale, faceConfig.scale);
+              
+              const pFace = processedFaceRef.current;
+              ctx.drawImage(pFace, -pFace.width / 2, -pFace.height / 2);
+              ctx.restore();
+            }
+          }, [step, baseImgObj, faceConfig, renderTrigger]);
 
-                    {step === 1 ? (
-                        <div className="w-full max-w-md space-y-6">
-                            <label className="block border-2 border-dashed border-zinc-800 rounded-3xl p-10 text-center hover:border-yellow-500/50 transition-all cursor-pointer bg-zinc-900/30">
-                                <Icon name="image" size={40} className="mx-auto mb-4 text-zinc-600" />
-                                <p className="font-bold">上传表情包底图</p>
-                                <p className="text-sm text-zinc-500 mt-1">支持 PNG, JPG, WEBP</p>
-                                <input type="file" className="hidden" onChange={(e) => handleUpload('base', e)} accept="image/*" />
-                                {baseImg && <div className="mt-4 text-yellow-500 text-xs font-bold uppercase">已选择底图 ✓</div>}
-                            </label>
+          const startDraggingFace = (e) => {
+            if (step !== 3) return;
+            if(e.cancelable) e.preventDefault();
+            setIsDraggingFace(true);
+            const pos = getCanvasPos(e, compositeCanvasRef.current);
+            dragStartRef.current = { x: pos.x, y: pos.y, faceX: faceConfig.x, faceY: faceConfig.y };
+          };
 
-                            <label className={`block border-2 border-dashed rounded-3xl p-10 text-center transition-all cursor-pointer ${baseImg ? 'border-yellow-500/50 bg-yellow-500/5' : 'border-zinc-800 opacity-50 pointer-events-none'}`}>
-                                <Icon name="user" size={40} className="mx-auto mb-4 text-yellow-500" />
-                                <p className="font-bold">上传人脸照片</p>
-                                <p className="text-sm text-zinc-500 mt-1 italic">上传后即刻进入工作台</p>
-                                <input type="file" className="hidden" onChange={(e) => handleUpload('face', e)} accept="image/*" />
-                            </label>
-                        </div>
-                    ) : (
-                        <div className="w-full max-w-lg space-y-6">
-                            {/* Canvas Display */}
-                            <div className="relative aspect-square w-full rounded-2xl overflow-hidden glass-panel shadow-2xl canvas-container"
-                                 onMouseDown={onStart} onMouseMove={onMove} onMouseUp={onEnd}
-                                 onTouchStart={onStart} onTouchMove={onMove} onTouchEnd={onEnd}>
-                                <canvas ref={canvasRef} className="w-full h-full object-contain" />
-                                
-                                <div className="absolute top-4 right-4 flex gap-2">
-                                    <button onClick={() => setStep(1)} className="p-3 rounded-full bg-zinc-900/80 text-zinc-400 border border-zinc-800">
-                                        <Icon name="refresh-cw" size={18} />
-                                    </button>
-                                    <button onClick={download} className="px-6 py-3 rounded-full bg-yellow-500 text-zinc-950 font-bold shadow-lg flex items-center gap-2">
-                                        <Icon name="download" size={18} /> 保存
-                                    </button>
-                                </div>
-                            </div>
+          const dragFace = (e) => {
+            if (!isDraggingFace || step !== 3) return;
+            if(e.cancelable) e.preventDefault();
+            const pos = getCanvasPos(e, compositeCanvasRef.current);
+            const dx = pos.x - dragStartRef.current.x;
+            const dy = pos.y - dragStartRef.current.y;
+            
+            setFaceConfig(prev => ({
+              ...prev,
+              x: dragStartRef.current.faceX + dx,
+              y: dragStartRef.current.faceY + dy
+            }));
+          };
 
-                            {/* Controls */}
-                            <div className="p-6 rounded-3xl glass-panel space-y-6 custom-scrollbar max-h-[40vh] overflow-y-auto">
-                                <div className="flex items-center justify-between mb-2">
-                                    <h3 className="font-bold text-yellow-500 flex items-center gap-2">
-                                        <Icon name="sliders" size={16} /> 调整参数
-                                    </h3>
-                                    <div className="flex gap-4">
-                                        <label className="flex items-center gap-2 text-xs">
-                                            <input type="checkbox" checked={config.grayscale} onChange={(e) => setConfig(prev => ({ ...prev, grayscale: e.target.checked }))} className="accent-yellow-500" /> 熊猫头滤镜
-                                        </label>
-                                    </div>
-                                </div>
+          const stopDraggingFace = () => setIsDraggingFace(false);
 
-                                <div className="space-y-4">
-                                    <div>
-                                        <div className="flex justify-between text-xs text-zinc-500 mb-2"><span>大小缩放</span> <span>{Math.round(config.scale * 100)}%</span></div>
-                                        <input type="range" min="0.1" max="2" step="0.01" value={config.scale} onChange={(e) => setConfig(prev => ({ ...prev, scale: parseFloat(e.target.value) }))} className="w-full accent-yellow-500" />
-                                    </div>
-                                    <div>
-                                        <div className="flex justify-between text-xs text-zinc-500 mb-2"><span>灰度阈值</span> <span>{config.threshold}</span></div>
-                                        <input type="range" min="0" max="255" value={config.threshold} onChange={(e) => setConfig(prev => ({ ...prev, threshold: parseInt(e.target.value) }))} className="w-full accent-yellow-500" />
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div>
-                                            <div className="text-xs text-zinc-500 mb-2">旋转角度</div>
-                                            <input type="range" min="-180" max="180" value={config.rotate} onChange={(e) => setConfig(prev => ({ ...prev, rotate: parseInt(e.target.value) }))} className="w-full accent-yellow-500" />
-                                        </div>
-                                        <div>
-                                            <div className="text-xs text-zinc-500 mb-2">对比度</div>
-                                            <input type="range" min="0" max="300" value={config.contrast} onChange={(e) => setConfig(prev => ({ ...prev, contrast: parseInt(e.target.value) }))} className="w-full accent-yellow-500" />
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    )}
+          const handleDownload = () => {
+            const canvas = compositeCanvasRef.current;
+            const dataUrl = canvas.toDataURL('image/png');
+            const link = document.createElement('a');
+            link.download = 'meme-pro-' + Date.now() + '.png';
+            link.href = dataUrl;
+            link.click();
+          };
+
+          // ==== UI 渲染 ====
+          return (
+            <div className="min-h-screen bg-zinc-950 flex flex-col items-center py-6 px-4 md:py-10 text-zinc-200">
+              <div className="w-full max-w-5xl bg-zinc-900 rounded-3xl shadow-[0_0_50px_rgba(0,0,0,0.5)] border border-zinc-800 overflow-hidden flex flex-col">
+                
+                {/* Header */}
+                <div className="bg-gradient-to-b from-zinc-800 to-zinc-900 p-6 text-center border-b border-yellow-500/20 relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-yellow-700 via-yellow-400 to-yellow-700"></div>
+                  <h1 className="text-3xl font-extrabold flex items-center justify-center gap-3 tracking-wide mt-2 md:mt-0">
+                    <Icon name="crown" className="w-8 h-8 text-yellow-500" />
+                    <span className="text-transparent bg-clip-text bg-gradient-to-r from-yellow-500 via-yellow-200 to-yellow-500">
+                      MEME STUDIO PRO
+                    </span>
+                  </h1>
+                  <p className="text-zinc-400 text-sm mt-2 tracking-widest uppercase">Professional PWA Generator</p>
                 </div>
-            );
+
+                {/* 步骤指示器 */}
+                <div className="flex justify-center items-center gap-2 md:gap-6 py-5 bg-zinc-900/50 border-b border-zinc-800">
+                  {[
+                    { id: 1, label: '上传素材' },
+                    { id: 2, label: '智能抠图' },
+                    { id: 3, label: '精细合成' }
+                  ].map((s) => (
+                    <div key={s.id} className="flex items-center gap-2">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm transition-all duration-300 ${
+                        step === s.id 
+                          ? 'bg-gradient-to-br from-yellow-400 to-yellow-600 text-zinc-950 shadow-[0_0_15px_rgba(234,179,8,0.4)]' 
+                          : step > s.id 
+                            ? 'bg-zinc-800 text-yellow-500 border border-yellow-500/30' 
+                            : 'bg-zinc-800 text-zinc-600 border border-zinc-700'
+                      }`}>
+                        {s.id}
+                      </div>
+                      <span className={`text-sm font-semibold hidden md:block ${step === s.id ? 'text-yellow-500' : 'text-zinc-500'}`}>
+                        {s.label}
+                      </span>
+                      {s.id !== 3 && <Icon name="chevron-right" className="w-4 h-4 text-zinc-700 mx-1 md:mx-2" />}
+                    </div>
+                  ))}
+                </div>
+
+                {/* 工作区 */}
+                <div className="p-4 md:p-8 flex-1 flex flex-col">
+                  
+                  {/* STEP 1: 上传图片 */}
+                  {step === 1 && (
+                    <div className="flex flex-col items-center justify-center flex-1 py-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-3xl mb-8">
+                        
+                        <label className="border-2 border-dashed border-zinc-700 hover:border-yellow-500/50 rounded-2xl flex flex-col items-center justify-center p-6 bg-zinc-800/30 hover:bg-zinc-800/50 transition-all duration-300 cursor-pointer group h-56 relative overflow-hidden shadow-lg">
+                          {basePreview ? (
+                            <img src={basePreview} alt="Base" className="absolute inset-0 w-full h-full object-contain p-4" />
+                          ) : (
+                            <React.Fragment>
+                              <div className="p-4 bg-zinc-800 rounded-full mb-3 group-hover:scale-110 transition-transform duration-300 shadow-[0_0_15px_rgba(0,0,0,0.5)] group-hover:shadow-[0_0_15px_rgba(234,179,8,0.2)]">
+                                <Icon name="image" className="w-8 h-8 text-yellow-500/70 group-hover:text-yellow-400" />
+                              </div>
+                              <span className="text-zinc-200 font-bold">上传表情包底图</span>
+                            </React.Fragment>
+                          )}
+                          <input type="file" accept="image/*" className="hidden" onChange={handleUploadBase} />
+                          {basePreview && <div className="absolute bottom-2 right-2 bg-zinc-900/80 backdrop-blur text-yellow-500 text-xs px-2 py-1 rounded-full border border-yellow-500/30">点击更换</div>}
+                        </label>
+
+                        <label className="border-2 border-dashed border-zinc-700 hover:border-yellow-500/50 rounded-2xl flex flex-col items-center justify-center p-6 bg-zinc-800/30 hover:bg-zinc-800/50 transition-all duration-300 cursor-pointer group h-56 relative overflow-hidden shadow-lg">
+                          {facePreview ? (
+                            <img src={facePreview} alt="Face" className="absolute inset-0 w-full h-full object-cover p-2 opacity-60 mix-blend-luminosity group-hover:mix-blend-normal transition-all duration-500" />
+                          ) : (
+                            <React.Fragment>
+                              <div className="p-4 bg-zinc-800 rounded-full mb-3 group-hover:scale-110 transition-transform duration-300 shadow-[0_0_15px_rgba(0,0,0,0.5)] group-hover:shadow-[0_0_15px_rgba(234,179,8,0.2)]">
+                                <Icon name="user" className="w-8 h-8 text-yellow-500/70 group-hover:text-yellow-400" />
+                              </div>
+                              <span className="text-zinc-200 font-bold">上传人脸照片</span>
+                            </React.Fragment>
+                          )}
+                          <input type="file" accept="image/*" className="hidden" onChange={handleUploadFace} />
+                          {facePreview && <div className="absolute bottom-2 right-2 bg-zinc-900/80 backdrop-blur text-yellow-500 text-xs px-2 py-1 rounded-full border border-yellow-500/30">点击更换</div>}
+                        </label>
+                      </div>
+
+                      <button 
+                        onClick={goToStep2} 
+                        disabled={!baseImgObj || !imgObj}
+                        className={`px-12 py-4 rounded-full font-extrabold text-lg transition-all duration-300 ${
+                          (!baseImgObj || !imgObj) 
+                            ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed border border-zinc-700' 
+                            : 'bg-gradient-to-r from-yellow-600 to-yellow-500 text-zinc-950 hover:from-yellow-500 hover:to-yellow-400 shadow-[0_0_20px_rgba(234,179,8,0.3)] hover:shadow-[0_0_30px_rgba(234,179,8,0.5)] hover:-translate-y-1'
+                        }`}
+                      >
+                        进入工作台
+                      </button>
+                    </div>
+                  )}
+
+                  {/* STEP 2: 抠图 */}
+                  {step === 2 && (
+                    <div className="flex flex-col lg:flex-row gap-6 w-full">
+                      <div className="flex-[3] bg-zinc-950/50 rounded-2xl border border-zinc-800 p-2 flex flex-col items-center justify-center relative shadow-inner overflow-hidden min-h-[300px]">
+                        <div className="absolute top-2 left-2 bg-zinc-900/80 backdrop-blur border border-zinc-800 text-zinc-300 text-[10px] px-2 py-1 rounded-lg flex items-center gap-1 z-10">
+                          <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
+                          涂抹保留区域
+                        </div>
+                        <div className="relative w-full max-w-[400px] shadow-2xl canvas-container">
+                          <canvas ref={imageCanvasRef} className="w-full h-auto block rounded-lg border border-zinc-800" />
+                          <canvas 
+                            ref={maskCanvasRef} 
+                            className="absolute top-0 left-0 w-full h-full cursor-crosshair opacity-60 rounded-lg"
+                            onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing}
+                            onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex-[1] lg:w-72 flex flex-col gap-4">
+                        <div className="bg-zinc-800/40 border border-zinc-700/50 rounded-2xl p-4 flex flex-col gap-4">
+                          <h3 className="text-zinc-200 font-bold text-xs flex items-center gap-1">
+                            <Icon name="paintbrush" className="w-3 h-3 text-yellow-500" /> 画笔工具
+                          </h3>
+                          <div className="flex gap-2 p-1 bg-zinc-900 rounded-xl border border-zinc-800">
+                            <button onClick={() => setBrushMode('brush')} className={`flex-1 py-2 rounded-lg flex items-center justify-center gap-1 text-xs font-semibold ${brushMode === 'brush' ? 'bg-yellow-500/10 text-yellow-500' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'}`}>涂抹</button>
+                            <button onClick={() => setBrushMode('eraser')} className={`flex-1 py-2 rounded-lg flex items-center justify-center gap-1 text-xs font-semibold ${brushMode === 'eraser' ? 'bg-yellow-500/10 text-yellow-500' : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'}`}>擦除</button>
+                          </div>
+                          <div>
+                            <div className="flex justify-between text-xs text-zinc-400 mb-1"><span>粗细</span><span>{brushSize}px</span></div>
+                            <input type="range" min="5" max="100" value={brushSize} onChange={(e) => setBrushSize(parseInt(e.target.value))} className="w-full accent-yellow-500" />
+                          </div>
+                          <button onClick={clearMask} className="py-2 border border-red-500/30 text-red-400 hover:bg-red-500/10 rounded-xl text-xs font-medium">清空涂抹</button>
+                        </div>
+
+                        <div className="mt-auto flex flex-col gap-2">
+                          <button onClick={handleExtractFace} className="py-3 rounded-xl bg-gradient-to-r from-yellow-600 to-yellow-500 text-zinc-950 font-bold shadow-lg">进入图像处理</button>
+                          <button onClick={() => setStep(1)} className="py-2.5 rounded-xl border border-zinc-700 text-zinc-400 font-medium text-sm">返回</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* STEP 3: 合成 */}
+                  {step === 3 && (
+                    <div className="flex flex-col lg:flex-row gap-6 w-full">
+                      <div className="flex-[3] bg-zinc-950/80 rounded-2xl border border-zinc-800 p-2 flex flex-col items-center justify-center relative min-h-[300px]">
+                        <div className="absolute top-2 left-2 bg-yellow-500/10 border border-yellow-500/30 text-yellow-500 text-[10px] px-2 py-1 rounded-lg z-10 backdrop-blur">
+                          画布上可直接拖拽五官
+                        </div>
+                        <div className="w-full max-w-[400px] border border-zinc-700 rounded-lg overflow-hidden shadow-2xl bg-white relative canvas-container">
+                          <canvas 
+                            ref={compositeCanvasRef} className="w-full h-auto block"
+                            onMouseDown={startDraggingFace} onMouseMove={dragFace} onMouseUp={stopDraggingFace} onMouseLeave={stopDraggingFace}
+                            onTouchStart={startDraggingFace} onTouchMove={dragFace} onTouchEnd={stopDraggingFace}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex-[2] lg:w-80 flex flex-col gap-4 overflow-y-auto pr-2 custom-scrollbar">
+                        <div className="bg-zinc-800/40 border border-zinc-700/50 rounded-2xl p-4 flex flex-col gap-3">
+                          <h3 className="text-zinc-200 font-bold text-xs flex items-center gap-1"><Icon name="sliders" className="w-3 h-3 text-yellow-500"/> 色阶与羽化</h3>
+                          
+                          <div><div className="flex justify-between text-xs text-zinc-400"><span>边缘羽化</span><span>{faceFilter.feather}px</span></div><input type="range" min="0" max="30" value={faceFilter.feather} onChange={(e) => setFaceFilter(prev => ({...prev, feather: parseInt(e.target.value)}))} className="w-full accent-yellow-500" /></div>
+                          <div><div className="flex justify-between text-xs text-zinc-400"><span>黑场 (加深线条)</span><span>{faceFilter.blackPoint}</span></div><input type="range" min="0" max="250" value={faceFilter.blackPoint} onChange={(e) => setFaceFilter(prev => ({...prev, blackPoint: Math.min(parseInt(e.target.value), prev.whitePoint - 1)}))} className="w-full accent-zinc-500" /></div>
+                          <div><div className="flex justify-between text-xs text-zinc-400"><span>白场 (去阴影)</span><span>{faceFilter.whitePoint}</span></div><input type="range" min="5" max="255" value={faceFilter.whitePoint} onChange={(e) => setFaceFilter(prev => ({...prev, whitePoint: Math.max(parseInt(e.target.value), prev.blackPoint + 1)}))} className="w-full accent-zinc-200" /></div>
+                        </div>
+
+                        <div className="bg-zinc-800/40 border border-zinc-700/50 rounded-2xl p-4 grid grid-cols-2 gap-4">
+                          <div><div className="flex justify-between text-xs text-zinc-400"><span>亮度</span><span>{faceFilter.brightness}</span></div><input type="range" min="-100" max="100" value={faceFilter.brightness} onChange={(e) => setFaceFilter(prev => ({...prev, brightness: parseInt(e.target.value)}))} className="w-full accent-yellow-500" /></div>
+                          <div><div className="flex justify-between text-xs text-zinc-400"><span>对比度</span><span>{faceFilter.contrast}</span></div><input type="range" min="-100" max="100" value={faceFilter.contrast} onChange={(e) => setFaceFilter(prev => ({...prev, contrast: parseInt(e.target.value)}))} className="w-full accent-yellow-500" /></div>
+                        </div>
+
+                        <div className="bg-zinc-800/40 border border-zinc-700/50 rounded-2xl p-4 grid grid-cols-2 gap-4">
+                          <div><div className="flex justify-between text-xs text-zinc-400"><span>缩放</span><span>{faceConfig.scale.toFixed(2)}x</span></div><input type="range" min="0.1" max="3" step="0.05" value={faceConfig.scale} onChange={(e) => setFaceConfig(prev => ({...prev, scale: parseFloat(e.target.value)}))} className="w-full accent-yellow-500" /></div>
+                          <div><div className="flex justify-between text-xs text-zinc-400"><span>旋转</span><span>{faceConfig.rotation}°</span></div><input type="range" min="-180" max="180" value={faceConfig.rotation} onChange={(e) => setFaceConfig(prev => ({...prev, rotation: parseInt(e.target.value)}))} className="w-full accent-yellow-500" /></div>
+                        </div>
+
+                        <div className="flex gap-2 mt-2">
+                          <button onClick={() => setStep(2)} className="flex-[1] py-3 rounded-xl border border-zinc-600 text-zinc-300 font-bold hover:bg-zinc-800 text-xs">修补</button>
+                          <button onClick={handleDownload} className="flex-[2] py-3 rounded-xl bg-gradient-to-r from-yellow-600 to-yellow-500 text-zinc-950 font-extrabold shadow-lg text-sm flex justify-center items-center gap-1"><Icon name="download" className="w-4 h-4"/> 导出图片</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            </div>
+          );
         }
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
